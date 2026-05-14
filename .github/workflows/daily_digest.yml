@@ -1,8 +1,9 @@
 name: Daily Earnings Digest
 
 on:
-  workflow_dispatch:  # manualne uruchamianie z zakladki Actions
-  # schedule (cron) dodamy w mini-kroku 4
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'  # codziennie 6:00 UTC = 8:00 PL lato / 7:00 PL zima
 
 jobs:
   digest:
