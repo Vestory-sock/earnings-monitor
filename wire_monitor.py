@@ -1,13 +1,14 @@
-"""Wire monitor z Gemini i Wariant B filter.
+"""Wire monitor z Gemini, Wariant B filter i long-polling scheduler.
 
-Sesja 2a sub-step 2: full pipeline.
-GlobeNewswire RSS -> body fetch -> Gemini analiza -> Finnhub consensus -> filter -> Telegram.
+Sesja 2a sub-step 3: dodaje detekcje trybu (single pass vs long polling)
+na podstawie aktualnego UTC. W oknach AMC/BMO pole co 20s przez 40-90 min.
 """
 import datetime
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import feedparser
@@ -26,8 +27,33 @@ FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings"
 STATE_FILE = Path("state.json")
 MAX_STATE_ENTRIES = 1000
 GEMINI_MODEL = "gemini-2.5-flash"
+POLL_INTERVAL_SEC = 20
 
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (Earnings Monitor Bot)"}
+
+
+def determine_runtime_minutes():
+    """Decyduje czy long-poll czy single-pass na podstawie aktualnego UTC."""
+    now = datetime.datetime.utcnow()
+    weekday = now.weekday()  # 0=Mon, 6=Sun
+
+    # Weekend - tylko single pass (US nie raportuje w weekendy)
+    if weekday >= 5:
+        return 0
+
+    hour = now.hour
+    minute = now.minute
+
+    # AMC window: ~19:45-22:30 UTC (= 21:45-00:30 PL summer)
+    if (hour == 19 and minute >= 45) or hour in (20, 21) or (hour == 22 and minute <= 30):
+        return 40
+
+    # BMO window: ~10:25-13:30 UTC (= 12:25-15:30 PL summer)
+    if (hour == 10 and minute >= 25) or hour in (11, 12) or (hour == 13 and minute <= 30):
+        return 90
+
+    # Poza oknami - single pass (backup lub manual trigger)
+    return 0
 
 
 def load_state():
@@ -44,16 +70,13 @@ def save_state(state):
 
 
 def fetch_globenewswire_earnings():
-    print("Pobieranie feedu GlobeNewswire earnings...")
     feed = feedparser.parse(GLOBENEWSWIRE_EARNINGS_FEED)
     if feed.bozo:
-        print(f"OSTRZEZENIE feed parser: {feed.bozo_exception}")
-    print(f"Pobrano {len(feed.entries)} wpisow.")
+        print(f"  OSTRZEZENIE feed parser: {feed.bozo_exception}")
     return feed.entries
 
 
 def fetch_press_release_body(url):
-    """Pobiera HTML press release i strippuje tagi do czystego tekstu."""
     response = requests.get(url, timeout=30, headers=HTTP_HEADERS)
     response.raise_for_status()
     html = response.text
@@ -61,11 +84,10 @@ def fetch_press_release_body(url):
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:8000]  # limit kontekstu Gemini
+    return text[:8000]
 
 
 def analyze_with_gemini(client, press_release_text):
-    """Wysyla press release do Gemini, parsuje JSON z odpowiedzi."""
     prompt = f"""Przeanalizuj ten earnings press release i zwroc CZYSTY JSON (bez markdown).
 
 Format:
@@ -95,7 +117,6 @@ Press release:
             contents=prompt,
         )
         text = response.text.strip()
-        # Strip markdown code fences jesli Gemini je dorzucil mimo instrukcji
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text
             if text.rstrip().endswith("```"):
@@ -103,7 +124,7 @@ Press release:
         return json.loads(text.strip())
     except json.JSONDecodeError as e:
         print(f"  BLAD parsowania JSON od Gemini: {e}")
-        print(f"  Raw response (pierwsze 300 znakow): {text[:300]}")
+        print(f"  Raw (pierwsze 300): {text[:300]}")
         return None
     except Exception as e:
         print(f"  BLAD wywolania Gemini: {e}")
@@ -111,7 +132,6 @@ Press release:
 
 
 def fetch_consensus_from_finnhub(ticker):
-    """Pobiera consensus EPS/revenue dla tickera (zakres +/- 1 dzien)."""
     finnhub_token = os.environ.get("FINNHUB_TOKEN")
     if not finnhub_token:
         return None
@@ -145,7 +165,6 @@ def calculate_surprise_pct(actual, consensus):
 
 
 def should_alert(ticker, eps_surprise, rev_surprise, guidance_change, revenue_consensus):
-    """Wariant B filter."""
     is_watchlist = ticker in watchlist.WATCHLIST
     if is_watchlist:
         eps_thr = watchlist.WATCHLIST_EPS_THRESHOLD
@@ -225,6 +244,90 @@ def send_telegram(token, chat_id, message):
     response.raise_for_status()
 
 
+def run_one_pass(telegram_token, chat_id, gemini_client, state):
+    """Jeden przejazd po feedzie. Modyfikuje state in-place. Zwraca dict licznikow."""
+    processed = set(state.get("processed_ids", []))
+    counters = {"new_alerts": 0, "skipped_filter": 0, "skipped_error": 0, "processed": 0}
+
+    entries = fetch_globenewswire_earnings()
+
+    for entry in entries:
+        entry_id = entry.get("id") or entry.get("link")
+        if not entry_id or entry_id in processed:
+            continue
+
+        counters["processed"] += 1
+        print(f"\n--- ANALIZA: {entry.title[:100]}")
+        processed.add(entry_id)
+
+        try:
+            body = fetch_press_release_body(entry.link)
+            print(f"  Body length: {len(body)} chars")
+        except Exception as e:
+            print(f"  BLAD pobierania body: {e}")
+            counters["skipped_error"] += 1
+            continue
+
+        analysis = analyze_with_gemini(gemini_client, body)
+        if not analysis or not analysis.get("ticker"):
+            print(f"  Pominieto: brak analizy lub tickera")
+            counters["skipped_error"] += 1
+            continue
+
+        ticker = analysis["ticker"].upper()
+        print(f"  Ticker: {ticker}, EPS: {analysis.get('eps_actual')}, "
+              f"Rev: {analysis.get('revenue_actual')}, "
+              f"Guidance: {analysis.get('guidance_change')}")
+
+        consensus_data = fetch_consensus_from_finnhub(ticker)
+        if consensus_data:
+            print(f"  Consensus: EPS {consensus_data.get('eps_consensus')}, "
+                  f"Rev {consensus_data.get('revenue_consensus')}")
+        else:
+            print(f"  Brak consensus dla {ticker}")
+
+        eps_surprise = calculate_surprise_pct(
+            analysis.get("eps_actual"),
+            consensus_data.get("eps_consensus") if consensus_data else None,
+        )
+        rev_surprise = calculate_surprise_pct(
+            analysis.get("revenue_actual"),
+            consensus_data.get("revenue_consensus") if consensus_data else None,
+        )
+        rev_consensus_for_filter = (
+            consensus_data.get("revenue_consensus") if consensus_data else None
+        )
+
+        if should_alert(
+            ticker, eps_surprise, rev_surprise,
+            analysis.get("guidance_change"),
+            rev_consensus_for_filter,
+        ):
+            message = build_alert_message(
+                ticker, analysis, consensus_data,
+                eps_surprise, rev_surprise, entry.link,
+            )
+            send_telegram(telegram_token, chat_id, message)
+            counters["new_alerts"] += 1
+            print(f"  ✅ ALERT WYSLANY")
+        else:
+            counters["skipped_filter"] += 1
+            print(f"  ❌ Pominieto: nie przeszlo Wariant B filter")
+
+    state["processed_ids"] = list(processed)
+    return counters
+
+
+def print_summary(counters, prefix=""):
+    print(
+        f"\n{prefix}=== PODSUMOWANIE ===\n"
+        f"Przetworzonych nowych entries: {counters['processed']}\n"
+        f"Alerty wyslane: {counters['new_alerts']}\n"
+        f"Pominiete (filter): {counters['skipped_filter']}\n"
+        f"Pominiete (bledy): {counters['skipped_error']}"
+    )
+
+
 def main():
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -241,88 +344,39 @@ def main():
 
     gemini_client = genai.Client(api_key=gemini_api_key)
 
+    runtime_min = determine_runtime_minutes()
     state = load_state()
-    processed = set(state.get("processed_ids", []))
-    print(f"State: {len(processed)} przetworzonych entry IDs.")
+    print(f"State: {len(state.get('processed_ids', []))} przetworzonych entry IDs.")
+    print(f"Tryb: {'long polling ' + str(runtime_min) + ' min' if runtime_min > 0 else 'single pass'}")
 
-    entries = fetch_globenewswire_earnings()
+    if runtime_min == 0:
+        counters = run_one_pass(telegram_token, chat_id, gemini_client, state)
+        save_state(state)
+        print_summary(counters)
+        return
 
-    new_alerts = 0
-    skipped_filter = 0
-    skipped_error = 0
+    # Long polling mode
+    deadline = time.time() + runtime_min * 60
+    iteration = 0
+    total = {"new_alerts": 0, "skipped_filter": 0, "skipped_error": 0, "processed": 0}
 
-    for entry in entries:
-        entry_id = entry.get("id") or entry.get("link")
-        if not entry_id or entry_id in processed:
-            continue
+    while time.time() < deadline:
+        iteration += 1
+        print(f"\n========== ITERACJA {iteration} ==========")
+        counters = run_one_pass(telegram_token, chat_id, gemini_client, state)
+        for k in total:
+            total[k] += counters[k]
+        save_state(state)
 
-        print(f"\n--- ANALIZA: {entry.title[:100]}")
-        processed.add(entry_id)  # mark even on failure (avoid retry loop)
+        remaining = deadline - time.time()
+        if remaining <= POLL_INTERVAL_SEC:
+            break
+        print(f"Iter {iteration} koniec. Czekam {POLL_INTERVAL_SEC}s. "
+              f"Pozostalo {remaining:.0f}s.")
+        time.sleep(POLL_INTERVAL_SEC)
 
-        try:
-            body = fetch_press_release_body(entry.link)
-            print(f"  Body length: {len(body)} chars")
-        except Exception as e:
-            print(f"  BLAD pobierania body: {e}")
-            skipped_error += 1
-            continue
-
-        analysis = analyze_with_gemini(gemini_client, body)
-        if not analysis or not analysis.get("ticker"):
-            print(f"  Pominieto: brak analizy Gemini lub brak tickera")
-            skipped_error += 1
-            continue
-
-        ticker = analysis["ticker"].upper()
-        print(f"  Ticker: {ticker}, EPS: {analysis.get('eps_actual')}, "
-              f"Revenue: {analysis.get('revenue_actual')}, "
-              f"Guidance: {analysis.get('guidance_change')}")
-
-        consensus_data = fetch_consensus_from_finnhub(ticker)
-        if consensus_data:
-            print(f"  Consensus: EPS {consensus_data.get('eps_consensus')}, "
-                  f"Rev {consensus_data.get('revenue_consensus')}")
-        else:
-            print(f"  Brak consensus z Finnhub dla {ticker}")
-
-        eps_surprise = calculate_surprise_pct(
-            analysis.get("eps_actual"),
-            consensus_data.get("eps_consensus") if consensus_data else None,
-        )
-        rev_surprise = calculate_surprise_pct(
-            analysis.get("revenue_actual"),
-            consensus_data.get("revenue_consensus") if consensus_data else None,
-        )
-
-        revenue_consensus_for_filter = (
-            consensus_data.get("revenue_consensus") if consensus_data else None
-        )
-
-        if should_alert(
-            ticker, eps_surprise, rev_surprise,
-            analysis.get("guidance_change"),
-            revenue_consensus_for_filter,
-        ):
-            message = build_alert_message(
-                ticker, analysis, consensus_data,
-                eps_surprise, rev_surprise, entry.link,
-            )
-            send_telegram(telegram_token, chat_id, message)
-            new_alerts += 1
-            print(f"  ✅ ALERT WYSLANY")
-        else:
-            skipped_filter += 1
-            print(f"  ❌ Pominieto: nie przeszlo Wariant B filter")
-
-    state["processed_ids"] = list(processed)
-    save_state(state)
-
-    print(
-        f"\n=== PODSUMOWANIE ===\n"
-        f"Alerty wyslane: {new_alerts}\n"
-        f"Pominiete (filter): {skipped_filter}\n"
-        f"Pominiete (bledy): {skipped_error}"
-    )
+    print(f"\n========== KONIEC LONG POLLING (iteracji: {iteration}) ==========")
+    print_summary(total, prefix="ŁĄCZNE ")
 
 
 if __name__ == "__main__":
