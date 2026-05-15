@@ -17,8 +17,8 @@ import watchlist
 
 GLOBENEWSWIRE_EARNINGS_FEED = (
     "https://www.globenewswire.com/AtomFeed/subjectcode/"
-    "13-Earnings Releases And Operating Results/"
-    "feedTitle/GlobeNewswire - Earnings Releases And Operating Results"
+    "13-Earnings%20Releases%20And%20Operating%20Results/"
+    "feedTitle/GlobeNewswire%20-%20Earnings%20Releases%20And%20Operating%20Results"
 )
 
 STATE_FILE = Path("state.json")
