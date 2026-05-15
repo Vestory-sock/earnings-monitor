@@ -1,0 +1,40 @@
+name: Wire Monitor (GlobeNewswire)
+
+on:
+  workflow_dispatch:  # tylko manualnie na razie - scheduling w sub-stepie 3
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # potrzebne zeby commitowac state.json
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run wire monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python wire_monitor.py
+
+      - name: Commit state.json if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "Brak zmian w state.json"
+          else
+            git commit -m "Update state.json from wire_monitor"
+            git push
+          fi
