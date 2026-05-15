@@ -86,6 +86,13 @@ def main():
     print(f"State: {len(processed)} przetworzonych entry IDs juz w pamieci.")
 
     entries = fetch_globenewswire_earnings()
+
+    # DEBUG: pokaz wszystkie tytuly zeby zobaczyc format
+    print("\n=== TYTULY W FEEDZIE ===")
+    for entry in entries:
+        print(f"- {entry.title}")
+    print("=== /TYTULY ===\n")
+    
     new_alerts = 0
     skipped_no_match = 0
     skipped_no_ticker = 0
