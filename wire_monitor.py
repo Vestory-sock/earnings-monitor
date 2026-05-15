@@ -41,7 +41,7 @@ def save_state(state):
 def extract_tickers_from_title(title):
     """Wyciaga tickery z formatu '(NASDAQ: ABCD)' / '(NYSE: ABCD)' w tytule."""
     pattern = r"\((?:NYSE|NASDAQ|NYSE American|AMEX|TSX|TSXV|OTCQB|OTCQX)[^:)]*:\s*([A-Z\.]+)\)"
-    return set(re.findall(pattern, title))
+    return set(re.findall(pattern, title, re.IGNORECASE))
 
 
 def fetch_globenewswire_earnings():
@@ -86,12 +86,6 @@ def main():
     print(f"State: {len(processed)} przetworzonych entry IDs juz w pamieci.")
 
     entries = fetch_globenewswire_earnings()
-
-    # DEBUG: pokaz wszystkie tytuly zeby zobaczyc format
-    print("\n=== TYTULY W FEEDZIE ===")
-    for entry in entries:
-        print(f"- {entry.title}")
-    print("=== /TYTULY ===\n")
     
     new_alerts = 0
     skipped_no_match = 0
