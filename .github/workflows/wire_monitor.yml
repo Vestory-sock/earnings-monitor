@@ -1,13 +1,25 @@
 name: Wire Monitor (GlobeNewswire)
 
 on:
-  workflow_dispatch:  # tylko manualnie na razie - scheduling w sub-stepie 3
+  workflow_dispatch:
+  schedule:
+    # AMC US start: 21:50 PL summer = 19:50 UTC, Mon-Fri (40-min long poll)
+    - cron: '50 19 * * 1-5'
+    # BMO US start: 12:30 PL summer = 10:30 UTC, Mon-Fri (90-min long poll)
+    - cron: '30 10 * * 1-5'
+    # Backup off-hours: 05:00 PL = 03:00 UTC daily (single pass catch-up)
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: wire-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 100
     permissions:
-      contents: write  # potrzebne zeby commitowac state.json
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -37,6 +49,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Brak zmian w state.json"
           else
-            git commit -m "Update state.json from wire_monitor"
+            git commit -m "Update state.json from wire monitor"
             git push
           fi
