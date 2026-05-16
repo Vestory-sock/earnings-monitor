@@ -31,7 +31,7 @@ EDGAR_FEED_TPL = (
     "action=getcompany&CIK={cik}&type=8-K&dateb=&owner=include&count=10&output=atom"
 )
 EDGAR_HEADERS = {
-    "User-Agent": "Earnings Monitor Bot (vestory-sock github)",
+    "User-Agent": "Earnings Monitor Bot mailnaspam012345@gmail.com",
     "Accept-Encoding": "gzip, deflate",
 }
 
