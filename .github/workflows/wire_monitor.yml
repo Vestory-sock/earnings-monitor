@@ -8,7 +8,7 @@ on:
     # BMO US start: 12:30 PL summer = 10:30 UTC, Mon-Fri (90-min long poll)
     - cron: '30 10 * * 1-5'
     # Backup off-hours: 05:00 PL = 03:00 UTC daily (single pass catch-up)
-    - cron: '0 3 * * *'
+    - cron: '7 3 * * *'
 
 concurrency:
   group: wire-monitor
