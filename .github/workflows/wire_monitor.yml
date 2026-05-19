@@ -2,13 +2,6 @@ name: Wire Monitor (GlobeNewswire)
 
 on:
   workflow_dispatch:
-  schedule:
-    # AMC US start: 21:50 PL summer = 19:50 UTC, Mon-Fri (40-min long poll)
-    - cron: '50 19 * * 1-5'
-    # BMO US start: 12:30 PL summer = 10:30 UTC, Mon-Fri (90-min long poll)
-    - cron: '30 10 * * 1-5'
-    # Backup off-hours: 05:00 PL = 03:00 UTC daily (single pass catch-up)
-    - cron: '7 3 * * *'
 
 concurrency:
   group: wire-monitor
