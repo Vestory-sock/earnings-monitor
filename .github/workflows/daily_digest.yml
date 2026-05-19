@@ -2,8 +2,7 @@ name: Daily Earnings Digest
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '13 4 * * *'  # codziennie 6:00 UTC = 8:00 PL lato / 7:00 PL zima
+  
 
 jobs:
   digest:
