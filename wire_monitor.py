@@ -2,6 +2,12 @@
 
 Sesja 2b: dodaje SEC EDGAR jako drugie zrodlo dla watchlist mega-capow.
 Cold-start protection: nowe zrodla najpierw seedują state.json bez analizy.
+
+Weekend fix (P1 + P2):
+- P1 sanity: ekstremalne zaskoczenia (>50% rev / >100% eps) traktujemy jako bug
+  walutowy/skali i pomijamy alert.
+- P2 chinese filter: press releases z markerami waluty RMB / Beijing / HKEX
+  pomijamy w pipeline (chińskie ADR-y generują false signals przez RMB→USD mismatch).
 """
 import datetime
 import json
@@ -247,7 +253,33 @@ def calculate_surprise_pct(actual, consensus):
     return ((actual - consensus) / abs(consensus)) * 100.0
 
 
+# === P2: filter chinskich press releases ===
+
+def is_chinese_press_release(body):
+    """Wykrywa press release chinskiej spolki (waluta + geografia + cross-listing)."""
+    if not body:
+        return False
+    body_lower = body.lower()
+    markers = [
+        # Waluta
+        "rmb", "yuan", "renminbi", " cny ",
+        # Geografia (z przecinkiem zeby uniknac false matches typu "shanghaier")
+        "beijing,", "shanghai,", "shenzhen,", "guangzhou,", "hong kong,",
+        # Gieldy/listingi
+        "hkex:", "shanghai stock exchange", "shenzhen stock exchange",
+    ]
+    return any(m in body_lower for m in markers)
+
+
+# === Wariant B filter z P1 sanity check ===
+
 def should_alert(ticker, eps_surprise, rev_surprise, guidance_change, revenue_consensus):
+    # P1 sanity: ekstremalne zaskoczenia to prawie zawsze bug walutowy/skali
+    if rev_surprise is not None and abs(rev_surprise) > 50.0:
+        return False
+    if eps_surprise is not None and abs(eps_surprise) > 100.0:
+        return False
+
     is_watchlist = ticker in watchlist.WATCHLIST
     if is_watchlist:
         eps_thr = watchlist.WATCHLIST_EPS_THRESHOLD
@@ -363,6 +395,12 @@ def run_one_pass(telegram_token, chat_id, gemini_client, state):
         if not body or len(body) < 200:
             print(f"  Pominieto: body za krotkie ({len(body)} chars)")
             counters["skipped_error"] += 1
+            continue
+
+        # P2: pomijamy chinskie press releases (waluta RMB powoduje false signals)
+        if is_chinese_press_release(body):
+            counters["skipped_filter"] += 1
+            print(f"  ❌ Pominieto: chinski press release (RMB/HKEX/Shanghai)")
             continue
 
         print(f"  Body: {len(body)} chars")
